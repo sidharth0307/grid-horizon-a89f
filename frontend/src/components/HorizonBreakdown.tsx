@@ -23,10 +23,10 @@ export const HorizonBreakdown: React.FC<HorizonBreakdownProps> = ({ breakdown, l
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 mb-8">
       <div className="mb-4">
         <h2 className="text-base font-semibold text-white">
-          Forecast Error vs. Lead-Time Horizon
+          Forecast Error Across Wholesale Settlement Trading Blocks
         </h2>
         <p className="text-xs text-slate-400">
-          MAE and Bias as a function of elapsed hours between gate closure (D-1 09:20) and delivery (D)
+          MAE and Directional Net Bias grouped by delivery blocks (Europe/London time)
         </p>
       </div>
 
@@ -43,10 +43,11 @@ export const HorizonBreakdown: React.FC<HorizonBreakdownProps> = ({ breakdown, l
                 borderRadius: '8px',
                 fontSize: '12px',
               }}
+              formatter={(val: any, name: any) => [`${Number(val).toLocaleString()} MW`, name]}
             />
             <Legend verticalAlign="top" height={36} iconType="circle" />
             <Bar dataKey="mae_mw" name="Mean Absolute Error (MW)" fill="#38bdf8" isAnimationActive={false} />
-            <Bar dataKey="bias_mw" name="Directional Bias (MW)" fill="#f59e0b" isAnimationActive={false} />
+            <Bar dataKey="bias_mw" name="Directional Net Bias (MW)" fill="#f59e0b" isAnimationActive={false} />
           </BarChart>
         </ResponsiveContainer>
       </div>

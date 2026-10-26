@@ -2,6 +2,7 @@ export interface TimeSeriesPoint {
   startTime: string;
   actual_mw: number | null;
   forecast_mw: number | null;
+  publishTime?: string | null;
   error_mw: number | null;
   abs_error_mw: number | null;
   horizon_h: number | null;
@@ -28,6 +29,7 @@ export interface HorizonBreakdownItem {
   horizon_bucket: string;
   mae_mw: number;
   bias_mw: number;
+  avg_lead_time_h?: number;
   count: number;
 }
 

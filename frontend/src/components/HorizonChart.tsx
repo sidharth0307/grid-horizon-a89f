@@ -25,16 +25,30 @@ export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => 
     );
   }
 
-  // Format timestamp for display (e.g. "05 Jan 14:30")
-  const formattedData = data.map((d) => ({
-    ...d,
-    timeLabel: new Date(d.startTime).toLocaleTimeString([], {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    }),
-  }));
+  // Explicitly format in Europe/London timezone
+  const formattedData = data.map((d) => {
+    const delivery = new Date(d.startTime);
+    const pub = d.publishTime ? new Date(d.publishTime) : null;
+    return {
+      ...d,
+      timeLabel: delivery.toLocaleTimeString('en-GB', {
+        timeZone: 'Europe/London',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      publishLabel: pub
+        ? pub.toLocaleTimeString('en-GB', {
+            timeZone: 'Europe/London',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          })
+        : '—',
+    };
+  });
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 mb-6">
@@ -44,7 +58,7 @@ export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => 
             Wind Generation: Actual Outturn vs. Day-Ahead Forecast
           </h2>
           <p className="text-xs text-slate-400">
-            National half-hourly volume (MW) locked at gate closure
+            Timestamps formatted in Europe/London time • Forecasts locked strictly at gate closure
           </p>
         </div>
       </div>
@@ -59,7 +73,7 @@ export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => 
               fontSize={11}
               tickLine={false}
               interval="preserveStartEnd"
-              minTickGap={40}
+              minTickGap={50}
             />
             <YAxis
               stroke="#64748b"
@@ -74,7 +88,15 @@ export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => 
                 borderRadius: '8px',
                 fontSize: '12px',
               }}
-              formatter={(val: any) => [`${Number(val).toLocaleString()} MW`]}
+              formatter={(val: any, name: any, item: any) => {
+                if (name === 'Day-Ahead Forecast') {
+                  const leadTime = item?.payload?.horizon_h ? `${item.payload.horizon_h.toFixed(1)}h lead` : '';
+                  const pub = item?.payload?.publishLabel ? `Issued: ${item.payload.publishLabel} UK` : '';
+                  const extra = [pub, leadTime].filter(Boolean).join(', ');
+                  return [`${Number(val).toLocaleString()} MW (${extra})`, name];
+                }
+                return [`${Number(val).toLocaleString()} MW`, name];
+              }}
             />
             <Legend verticalAlign="top" height={36} iconType="circle" />
             <Line

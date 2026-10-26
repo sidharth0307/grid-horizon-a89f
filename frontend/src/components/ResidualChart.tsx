@@ -22,7 +22,8 @@ export const ResidualChart: React.FC<ResidualChartProps> = ({ data, loading }) =
 
   const formattedData = data.map((d) => ({
     ...d,
-    timeLabel: new Date(d.startTime).toLocaleTimeString([], {
+    timeLabel: new Date(d.startTime).toLocaleTimeString('en-GB', {
+      timeZone: 'Europe/London',
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
@@ -54,7 +55,7 @@ export const ResidualChart: React.FC<ResidualChartProps> = ({ data, loading }) =
               fontSize={11}
               tickLine={false}
               interval="preserveStartEnd"
-              minTickGap={40}
+              minTickGap={50}
             />
             <YAxis
               stroke="#64748b"

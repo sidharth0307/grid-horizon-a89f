@@ -1,10 +1,14 @@
 import type { HorizonBreakdownItem, KPIResponse, MetaResponse, TimeSeriesPoint } from '../types/api';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+// If VITE_API_BASE_URL is set (e.g. Vercel -> Render), use it.
+// Otherwise, empty string routes to relative /api which NGINX or Vite proxy handles.
+const API_BASE = import.meta.env.VITE_API_BASE_URL !== undefined 
+  ? import.meta.env.VITE_API_BASE_URL 
+  : (import.meta.env.DEV ? 'http://localhost:8000' : '');
 
 export async function fetchMeta(): Promise<MetaResponse> {
   const res = await fetch(`${API_BASE}/api/meta`);
-  if (!res.ok) throw new Error('Failed to fetch metadata');
+  if (!res.ok) throw new Error(`Failed to fetch metadata (${res.status})`);
   return res.json();
 }
 
@@ -18,7 +22,7 @@ export async function fetchMetrics(
   if (dateTo) params.append('date_to', dateTo);
 
   const res = await fetch(`${API_BASE}/api/metrics?${params.toString()}`);
-  if (!res.ok) throw new Error('Failed to fetch metrics');
+  if (!res.ok) throw new Error(`Failed to fetch metrics (${res.status})`);
   return res.json();
 }
 
@@ -32,7 +36,7 @@ export async function fetchSeries(
   if (dateTo) params.append('date_to', dateTo);
 
   const res = await fetch(`${API_BASE}/api/series?${params.toString()}`);
-  if (!res.ok) throw new Error('Failed to fetch time series');
+  if (!res.ok) throw new Error(`Failed to fetch time series (${res.status})`);
   return res.json();
 }
 
@@ -46,7 +50,7 @@ export async function fetchBreakdown(
   if (dateTo) params.append('date_to', dateTo);
 
   const res = await fetch(`${API_BASE}/api/breakdown?${params.toString()}`);
-  if (!res.ok) throw new Error('Failed to fetch lead-time breakdown');
+  if (!res.ok) throw new Error(`Failed to fetch breakdown (${res.status})`);
   return res.json();
 }
 
