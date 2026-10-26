@@ -9,47 +9,45 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.database import DB_PATH, init_db
 
-# Elexon BMRS Open API Stream Base URLs
-BASE_URL_FUELHH = "https://bmrs.elexon.co.uk/api-documentation/endpoint/datasets/FUELHH/stream"
-BASE_URL_WINDFOR = "https://bmrs.elexon.co.uk/api-documentation/endpoint/datasets/WINDFOR/stream"
+# Official Elexon Insights Solution API v1 Endpoints
+BASE_URL_FUELHH = "https://data.elexon.co.uk/bmrs/api/v1/datasets/FUELHH/stream"
+BASE_URL_WINDFOR = "https://data.elexon.co.uk/bmrs/api/v1/datasets/WINDFOR/stream"
 
 # Target Windows
-# Decision dates: 2026-01-01 to 2026-01-31
-# Delivery dates: 2026-01-02 00:00:00Z to 2026-02-01 23:30:00Z
-START_DATE_STR = "2026-01-02T00:00:00Z"
-END_DATE_STR = "2026-02-01T23:30:00Z"
+# Delivery dates: 2026-01-02 00:00:00Z to 2026-02-01 23:30:00Z (Jan 2026 Decisions)
+ACTUALS_DATE_FROM = "2025-12-30"  # Pulling from Jan 1 provides the 48h lag baseline for Jan 3+
+ACTUALS_DATE_TO = "2026-02-02"
 
-# Ingest forecasts starting 2025-12-31 to ensure we have D-1 coverage for Jan 2 delivery
+# Pull forecasts starting 2025-12-31 to cover D-1 gate closures for Jan 2 delivery
 FC_PUBLISH_FROM = "2025-12-31T00:00:00Z"
+FC_PUBLISH_TO = "2026-02-01T23:59:59Z"
 
 async def ingest_actuals(client: httpx.AsyncClient, conn: sqlite3.Connection):
-    print("Ingesting Actual Generation (FUELHH) for WIND...")
+    print("Fetching real Actual Generation (FUELHH) from data.elexon.co.uk...")
     params = {
-        "settlementDateFrom": "2026-01-02",
-        "settlementDateTo": "2026-02-01"
+        "settlementDateFrom": ACTUALS_DATE_FROM,
+        "settlementDateTo": ACTUALS_DATE_TO
     }
     
+    headers = {"Accept": "application/json"}
+    response = await client.get(BASE_URL_FUELHH, params=params, headers=headers, timeout=120.0)
+    
+    if response.status_code != 200:
+        raise RuntimeError(f"Elexon FUELHH fetch failed with status {response.status_code}: {response.text[:300]}")
+    
+    data = response.json()
+    records = data if isinstance(data, list) else data.get("data", [])
+    
     actual_rows = []
-    try:
-        response = await client.get(BASE_URL_FUELHH, params=params, timeout=60.0)
-        response.raise_for_status()
-        data = response.json()
-        
-        # BMRS stream format can be list or wrapped in data/response
-        records = data if isinstance(data, list) else data.get("data", [])
-        
-        for item in records:
-            fuel_type = str(item.get("fuelType", "")).upper()
-            if fuel_type == "WIND":
-                start_time = item.get("startTime")
-                gen = item.get("generation")
-                if start_time and gen is not None:
-                    actual_rows.append((start_time, float(gen)))
+    for item in records:
+        if str(item.get("fuelType", "")).upper() == "WIND":
+            start_time = item.get("startTime")
+            gen = item.get("generation")
+            if start_time and gen is not None:
+                actual_rows.append((start_time, float(gen)))
 
-    except Exception as e:
-        print(f"Warning: Failed to fetch live FUELHH stream: {e}")
-        print("Falling back to generating deterministic mock synthetic dataset for January 2026...")
-        actual_rows = generate_mock_actuals()
+    if not actual_rows:
+        raise RuntimeError("Zero wind records parsed from FUELHH response. Check API schema.")
 
     cursor = conn.cursor()
     cursor.executemany("""
@@ -57,33 +55,34 @@ async def ingest_actuals(client: httpx.AsyncClient, conn: sqlite3.Connection):
         VALUES (?, ?)
     """, actual_rows)
     conn.commit()
-    print(f"-> Successfully inserted {len(actual_rows)} actual generation records.")
+    print(f"-> Successfully inserted {len(actual_rows)} real actual generation records.")
 
 async def ingest_forecasts(client: httpx.AsyncClient, conn: sqlite3.Connection):
-    print("Ingesting Forecast Generation (WINDFOR)...")
+    print("Fetching real Forecast Generation (WINDFOR) from data.elexon.co.uk...")
     params = {
         "publishDateTimeFrom": FC_PUBLISH_FROM,
-        "publishDateTimeTo": "2026-02-01T00:00:00Z"
+        "publishDateTimeTo": FC_PUBLISH_TO
     }
     
+    headers = {"Accept": "application/json"}
+    response = await client.get(BASE_URL_WINDFOR, params=params, headers=headers, timeout=120.0)
+    
+    if response.status_code != 200:
+        raise RuntimeError(f"Elexon WINDFOR fetch failed with status {response.status_code}: {response.text[:300]}")
+    
+    data = response.json()
+    records = data if isinstance(data, list) else data.get("data", [])
+    
     fc_rows = []
-    try:
-        response = await client.get(BASE_URL_WINDFOR, params=params, timeout=60.0)
-        response.raise_for_status()
-        data = response.json()
-        
-        records = data if isinstance(data, list) else data.get("data", [])
-        for item in records:
-            pub_time = item.get("publishTime")
-            start_time = item.get("startTime")
-            gen = item.get("generation")
-            if pub_time and start_time and gen is not None:
-                fc_rows.append((pub_time, start_time, float(gen)))
+    for item in records:
+        pub_time = item.get("publishTime")
+        start_time = item.get("startTime")
+        gen = item.get("generation")
+        if pub_time and start_time and gen is not None:
+            fc_rows.append((pub_time, start_time, float(gen)))
 
-    except Exception as e:
-        print(f"Warning: Failed to fetch live WINDFOR stream: {e}")
-        print("Falling back to generating deterministic mock synthetic forecast dataset for January 2026...")
-        fc_rows = generate_mock_forecasts()
+    if not fc_rows:
+        raise RuntimeError("Zero forecast records parsed from WINDFOR response. Check API schema.")
 
     cursor = conn.cursor()
     cursor.executemany("""
@@ -91,60 +90,37 @@ async def ingest_forecasts(client: httpx.AsyncClient, conn: sqlite3.Connection):
         VALUES (?, ?, ?)
     """, fc_rows)
     conn.commit()
-    print(f"-> Successfully inserted {len(fc_rows)} forecast generation records.")
-
-def generate_mock_actuals():
-    """Generates realistic half-hourly wind generation curve for Jan 2 to Feb 1, 2026."""
-    import math
-    import pandas as pd
-    
-    timestamps = pd.date_range("2026-01-02 00:00:00", "2026-02-01 23:30:00", freq="30min", tz="UTC")
-    rows = []
-    for i, ts in enumerate(timestamps):
-        # Base realistic UK wind profile (oscillating between 2,500 MW and 14,000 MW)
-        cycle = math.sin(i / 18.0) * 4500.0 + math.cos(i / 4.0) * 1500.0
-        val = max(800.0, 7500.0 + cycle + (i % 7) * 120.0)
-        rows.append((ts.isoformat(), round(val, 2)))
-    return rows
-
-def generate_mock_forecasts():
-    """Generates realistic day-ahead forecasts including simulated errors and updates."""
-    import math
-    import pandas as pd
-    
-    timestamps = pd.date_range("2026-01-02 00:00:00", "2026-02-01 23:30:00", freq="30min", tz="UTC")
-    rows = []
-    
-    for i, ts in enumerate(timestamps):
-        target_date = ts.date()
-        d_minus_1 = target_date - pd.Timedelta(days=1)
-        
-        # Actual underlying trend
-        base = max(800.0, 7500.0 + math.sin(i / 18.0) * 4500.0 + math.cos(i / 4.0) * 1500.0)
-        
-        # 1. Day-Ahead Morning Forecast published at 08:30 London Time (Eligible for 09:20 cutoff)
-        pub_0830 = pd.Timestamp(d_minus_1, tz="UTC").replace(hour=8, minute=30)
-        # Inject standard forecast variance (±12% error)
-        fc_val_0830 = base * (1.0 + (math.sin(i / 6.0) * 0.12))
-        rows.append((pub_0830.isoformat(), ts.isoformat(), round(fc_val_0830, 2)))
-        
-        # 2. Later update published at 11:00 London Time (Must be filtered out by 09:20 cutoff)
-        pub_1100 = pd.Timestamp(d_minus_1, tz="UTC").replace(hour=11, minute=0)
-        fc_val_1100 = base * 1.02  # Closer to actual, represents potential data leakage
-        rows.append((pub_1100.isoformat(), ts.isoformat(), round(fc_val_1100, 2)))
-        
-    return rows
+    print(f"-> Successfully inserted {len(fc_rows)} real forecast generation records.")
 
 async def main():
+    print(f"Target Database: {DB_PATH}")
+    # Reset DB to eradicate mock data
+    if DB_PATH.exists():
+        DB_PATH.unlink()
+        print("Existing database deleted.")
+        
     init_db()
     conn = sqlite3.connect(DB_PATH)
     
-    async with httpx.AsyncClient() as client:
+    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    async with httpx.AsyncClient(limits=limits) as client:
         await ingest_actuals(client, conn)
         await ingest_forecasts(client, conn)
         
+    # Audit printouts
+    cursor = conn.cursor()
+    actual_count = cursor.execute("SELECT COUNT(*) FROM actual_generation").fetchone()[0]
+    fc_count = cursor.execute("SELECT COUNT(*) FROM forecast_generation").fetchone()[0]
+    distinct_pub = cursor.execute("SELECT COUNT(DISTINCT publish_time) FROM forecast_generation").fetchone()[0]
+    min_act = cursor.execute("SELECT MIN(start_time), MAX(start_time) FROM actual_generation").fetchone()
+    min_fc = cursor.execute("SELECT MIN(publish_time), MAX(publish_time) FROM forecast_generation").fetchone()
     conn.close()
-    print("\nIngestion pipeline complete. SQLite snapshot populated.")
+    
+    print("\n--- INGESTION AUDIT ---")
+    print(f"Actual Generation Rows: {actual_count} (Window: {min_act[0]} to {min_act[1]})")
+    print(f"Forecast Generation Rows: {fc_count}")
+    print(f"Distinct Publish Times: {distinct_pub} (Window: {min_fc[0]} to {min_fc[1]})")
+    print("------------------------\n")
 
 if __name__ == "__main__":
     asyncio.run(main())

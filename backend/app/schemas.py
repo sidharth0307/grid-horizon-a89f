@@ -6,6 +6,7 @@ class TimeSeriesPoint(BaseModel):
     startTime: str = Field(..., description="Target delivery settlement period (ISO UTC)")
     actual_mw: Optional[float] = Field(None, description="Actual wind generation outturn in MW")
     forecast_mw: Optional[float] = Field(None, description="Day-ahead forecast in MW as of gate closure")
+    publishTime: Optional[str] = Field(None, description="Timestamp when the forecast was issued")
     error_mw: Optional[float] = Field(None, description="Forecast - Actual (Positive = Shortfall Risk)")
     abs_error_mw: Optional[float] = Field(None, description="Absolute error in MW")
     horizon_h: Optional[float] = Field(None, description="Forecast lead time in hours")
