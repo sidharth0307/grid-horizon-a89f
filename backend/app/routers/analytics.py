@@ -1,11 +1,13 @@
 import io
-import re
-from typing import List, Optional
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-import pandas as pd
 
-from app.database import get_db_connection
+from app.config import DEFAULT_GATE, SCOPE_END, SCOPE_START
+from app.database import db_version, get_db_connection
 from app.schemas import HorizonBreakdownItem, KPIResponse, MetaResponse, TimeSeriesPoint
 from app.services.engine import (
     align_forecasts_as_of,
@@ -13,121 +15,147 @@ from app.services.engine import (
     compute_horizon_breakdown,
     compute_metrics,
     load_data_from_db,
-    parse_time_str
+    parse_time_str,
 )
 
 router = APIRouter(prefix="/api", tags=["Analytics"])
 
-DEFAULT_START = "2026-01-02T00:00:00Z"
-DEFAULT_END = "2026-02-01T23:30:00Z"
+GATE_PATTERN = r"^\d{2}:\d{2}$"
+_SCOPE_START_TS = pd.Timestamp(SCOPE_START)
+_SCOPE_END_TS = pd.Timestamp(SCOPE_END)
 
-def validate_date(date_str: Optional[str], param_name: str):
-    if not date_str:
-        return
+CSV_COLUMNS = [
+    "startTime", "actual_mw", "forecast_mw", "publishTime", "horizon_h",
+    "error_mw", "abs_error_mw", "bias_adjusted_mw", "persist_actual_mw",
+]
+
+
+def _parse_ts(value: Optional[str], default: str, name: str) -> pd.Timestamp:
     try:
-        pd.to_datetime(date_str)
-    except Exception:
+        return pd.to_datetime(value or default, utc=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid date for '{name}'. Use an ISO-8601 UTC timestamp."
+        ) from exc
+
+
+def _resolve_window(date_from: Optional[str], date_to: Optional[str]) -> Tuple[str, str]:
+    start = _parse_ts(date_from, SCOPE_START, "date_from")
+    end = _parse_ts(date_to, SCOPE_END, "date_to")
+    if start > end:
+        raise HTTPException(status_code=422, detail="date_from must not be after date_to.")
+    if start < _SCOPE_START_TS or end > _SCOPE_END_TS:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid date format for '{param_name}'. Must be ISO-8601 UTC string."
+            detail=f"Date range must lie within the evaluation scope {SCOPE_START} to {SCOPE_END}.",
         )
+    return start.strftime("%Y-%m-%dT%H:%M:%SZ"), end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-def validate_cutoff(cutoff_str: str):
-    if not re.match(r"^\d{2}:\d{2}$", cutoff_str):
-        raise HTTPException(
-            status_code=422,
-            detail="gate_cutoff must be in HH:MM format (e.g. 09:20)"
-        )
+
+def _resolve_gate(gate_cutoff: str):
     try:
-        return parse_time_str(cutoff_str)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        return parse_time_str(gate_cutoff)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@lru_cache(maxsize=64)
+def _aligned_cached(start: str, end: str, gate: str, snapshot_version: int) -> pd.DataFrame:
+    df_act, df_fc = load_data_from_db(start, end)
+    aligned = align_forecasts_as_of(df_fc, gate_closure=parse_time_str(gate))
+    return build_aligned_timeseries(df_act, aligned, start, end)
+
+
+def _get_processed_data(date_from: Optional[str], date_to: Optional[str], gate_cutoff: str) -> pd.DataFrame:
+    start, end = _resolve_window(date_from, date_to)
+    _resolve_gate(gate_cutoff)
+    # Cache key includes the snapshot mtime so a re-ingest is picked up; callers get a private copy.
+    return _aligned_cached(start, end, gate_cutoff, db_version()).copy()
+
+
+def _clean(value: Any) -> Any:
+    """NaN/NaT -> None; Timestamps -> ISO strings (strict JSON has no NaN)."""
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return value
+
 
 @router.get("/meta", response_model=MetaResponse)
 def get_metadata():
     conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT MIN(start_time), MAX(start_time), COUNT(*) FROM actual_generation WHERE start_time >= ? AND start_time <= ?", (DEFAULT_START, DEFAULT_END))
-    row_act = c.fetchone()
-    c.execute("SELECT COUNT(*) FROM forecast_generation WHERE start_time >= ? AND start_time <= ?", (DEFAULT_START, DEFAULT_END))
-    fc_count = c.fetchone()[0]
-    conn.close()
-    
+    try:
+        c = conn.cursor()
+        c.execute(
+            "SELECT COUNT(*) FROM actual_generation WHERE start_time >= ? AND start_time <= ?",
+            (SCOPE_START, SCOPE_END),
+        )
+        actuals = c.fetchone()[0]
+        c.execute(
+            "SELECT COUNT(*) FROM forecast_generation WHERE start_time >= ? AND start_time <= ?",
+            (SCOPE_START, SCOPE_END),
+        )
+        forecasts = c.fetchone()[0]
+    finally:
+        conn.close()
     return MetaResponse(
-        min_delivery_date=DEFAULT_START,
-        max_delivery_date=DEFAULT_END,
-        default_gate_closure="09:20",
-        actuals_count=row_act[2] if row_act else 1488,
-        forecasts_count=fc_count
+        min_delivery_date=SCOPE_START,
+        max_delivery_date=SCOPE_END,
+        default_gate_closure=DEFAULT_GATE,
+        actuals_count=actuals,
+        forecasts_count=forecasts,
     )
 
-def _get_processed_data(date_from: Optional[str], date_to: Optional[str], cutoff_str: str):
-    validate_date(date_from, "date_from")
-    validate_date(date_to, "date_to")
-    gate = validate_cutoff(cutoff_str)
-    
-    start = date_from if date_from else DEFAULT_START
-    end = date_to if date_to else DEFAULT_END
-    
-    df_act, df_fc = load_data_from_db(start, end)
-    aligned_fc = align_forecasts_as_of(df_fc, gate_closure=gate)
-    return build_aligned_timeseries(df_act, aligned_fc, start, end)
 
 @router.get("/metrics", response_model=KPIResponse)
 def get_metrics(
-    date_from: Optional[str] = Query(None, description="Start timestamp ISO UTC"),
-    date_to: Optional[str] = Query(None, description="End timestamp ISO UTC"),
-    gate_cutoff: str = Query("09:20", description="HH:MM gate closure in Europe/London time")
+    date_from: Optional[str] = Query(None, description="Start timestamp, ISO UTC"),
+    date_to: Optional[str] = Query(None, description="End timestamp, ISO UTC"),
+    gate_cutoff: str = Query(DEFAULT_GATE, pattern=GATE_PATTERN, description="HH:MM gate closure, Europe/London"),
 ):
-    df = _get_processed_data(date_from, date_to, gate_cutoff)
-    return compute_metrics(df)
+    return compute_metrics(_get_processed_data(date_from, date_to, gate_cutoff))
+
 
 @router.get("/series", response_model=List[TimeSeriesPoint])
 def get_series(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    gate_cutoff: str = Query("09:20")
+    gate_cutoff: str = Query(DEFAULT_GATE, pattern=GATE_PATTERN),
 ):
     df = _get_processed_data(date_from, date_to, gate_cutoff)
-    df_clean = df.replace({float("nan"): None})
-    
-    records = []
-    for _, row in df_clean.iterrows():
-        records.append(TimeSeriesPoint(
-            startTime=str(row["startTime"].isoformat()),
-            actual_mw=row["actual_mw"],
-            forecast_mw=row["forecast_mw"],
-            bias_adjusted_mw=row["bias_adjusted_mw"] if "bias_adjusted_mw" in row and pd.notna(row["bias_adjusted_mw"]) else None,
-            publishTime=str(row["publishTime"].isoformat()) if "publishTime" in row and pd.notna(row["publishTime"]) else None,
-            error_mw=row["error_mw"],
-            abs_error_mw=row["abs_error_mw"],
-            horizon_h=row["horizon_h"] if "horizon_h" in row and pd.notna(row["horizon_h"]) else None
-        ))
-    return records
+    records: List[Dict[str, Any]] = df.reindex(columns=CSV_COLUMNS).to_dict("records")
+    return [
+        TimeSeriesPoint(**{k: _clean(v) for k, v in rec.items() if k != "persist_actual_mw"})
+        for rec in records
+    ]
+
 
 @router.get("/breakdown", response_model=List[HorizonBreakdownItem])
 def get_breakdown(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    gate_cutoff: str = Query("09:20")
+    gate_cutoff: str = Query(DEFAULT_GATE, pattern=GATE_PATTERN),
 ):
-    df = _get_processed_data(date_from, date_to, gate_cutoff)
-    return compute_horizon_breakdown(df)
+    return compute_horizon_breakdown(_get_processed_data(date_from, date_to, gate_cutoff))
+
 
 @router.get("/export.csv")
 def export_csv(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    gate_cutoff: str = Query("09:20")
+    gate_cutoff: str = Query(DEFAULT_GATE, pattern=GATE_PATTERN),
 ):
     df = _get_processed_data(date_from, date_to, gate_cutoff)
-    output = io.StringIO()
-    df.to_csv(output, index=False)
-    output.seek(0)
-    
-    filename = f"wind_forecast_eval_jan2026_{gate_cutoff.replace(':', '')}.csv"
+    start, end = _resolve_window(date_from, date_to)
+    out = df.reindex(columns=CSV_COLUMNS)
+    numeric = out.select_dtypes("number").columns
+    out[numeric] = out[numeric].round(2)
+    buffer = io.StringIO()
+    out.to_csv(buffer, index=False)
+    filename = f"wind_forecast_eval_gate{gate_cutoff.replace(':', '')}_{start[:10]}_{end[:10]}.csv"
     return StreamingResponse(
-        iter([output.getvalue()]),
+        iter([buffer.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )

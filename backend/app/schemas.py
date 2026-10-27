@@ -1,12 +1,11 @@
-from datetime import datetime
-from typing import List, Optional
+from typing import Optional
 from pydantic import BaseModel, Field
 
 class TimeSeriesPoint(BaseModel):
     startTime: str = Field(..., description="Target delivery settlement period (ISO UTC)")
     actual_mw: Optional[float] = Field(None, description="Actual wind generation outturn in MW")
     forecast_mw: Optional[float] = Field(None, description="Day-ahead forecast in MW as of gate closure")
-    bias_adjusted_mw: Optional[float] = Field(None, description="Forecast minus trailing 7-day walk-forward bias")
+    bias_adjusted_mw: Optional[float] = Field(None, description="Forecast minus trailing 7-day walk-forward bias (delivery days D-8..D-2); null without history")
     publishTime: Optional[str] = Field(None, description="Timestamp when the forecast was issued")
     error_mw: Optional[float] = Field(None, description="Forecast - Actual (Positive = Shortfall Risk)")
     abs_error_mw: Optional[float] = Field(None, description="Absolute error in MW")
@@ -20,6 +19,7 @@ class KPIResponse(BaseModel):
     rmse_mw: Optional[float]
     mean_bias_mw: Optional[float]
     wape_pct: Optional[float]
+    over_forecast_share_pct: Optional[float] = Field(None, description="Share of periods where forecast > actual")
     max_shortfall_risk_mw: Optional[float]
     max_surplus_mw: Optional[float]
     p10_error_mw: Optional[float]
@@ -27,8 +27,9 @@ class KPIResponse(BaseModel):
     p90_error_mw: Optional[float]
     persistence_mae_mw: Optional[float]
     skill_score_pct: Optional[float]
-    debiased_mae_mw: Optional[float] = Field(None, description="MAE after trailing 7-day walk-forward bias correction")
-    debiased_improvement_pct: Optional[float] = Field(None, description="Percentage MAE reduction from bias adjustment")
+    debiased_mae_mw: Optional[float] = Field(None, description="MAE after trailing 7-day walk-forward bias correction, on periods with enough history")
+    debiased_improvement_pct: Optional[float] = Field(None, description="MAE reduction vs raw forecast on the same periods")
+    debiased_periods: Optional[int] = Field(None, description="Periods with a causal bias correction available")
 
 class HorizonBreakdownItem(BaseModel):
     horizon_bucket: str
