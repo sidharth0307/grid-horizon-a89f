@@ -14,9 +14,10 @@ import type { TimeSeriesPoint } from '../types/api';
 interface HorizonChartProps {
   data: TimeSeriesPoint[];
   loading: boolean;
+  showDebiased: boolean;
 }
 
-export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => {
+export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading, showDebiased }) => {
   if (loading) {
     return (
       <div className="h-80 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-center text-slate-500">
@@ -25,7 +26,6 @@ export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => 
     );
   }
 
-  // Explicitly format in Europe/London timezone
   const formattedData = data.map((d) => {
     const delivery = new Date(d.startTime);
     const pub = d.publishTime ? new Date(d.publishTime) : null;
@@ -79,7 +79,7 @@ export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => 
               stroke="#64748b"
               fontSize={11}
               tickLine={false}
-              tickFormatter={(v) => `${(v / 1000).toFixed(1)}k`}
+              tickFormatter={(v: number) => `${(v / 1000).toFixed(1)}k`}
             />
             <Tooltip
               contentStyle={{
@@ -88,14 +88,16 @@ export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => 
                 borderRadius: '8px',
                 fontSize: '12px',
               }}
-              formatter={(val: any, name: any, item: any) => {
-                if (name === 'Day-Ahead Forecast') {
+              formatter={(val: unknown, name: unknown, item: { payload?: { horizon_h?: number; publishLabel?: string } }) => {
+                const numericVal = Number(val);
+                const strName = String(name);
+                if (strName === 'Day-Ahead Forecast') {
                   const leadTime = item?.payload?.horizon_h ? `${item.payload.horizon_h.toFixed(1)}h lead` : '';
                   const pub = item?.payload?.publishLabel ? `Issued: ${item.payload.publishLabel} UK` : '';
                   const extra = [pub, leadTime].filter(Boolean).join(', ');
-                  return [`${Number(val).toLocaleString()} MW (${extra})`, name];
+                  return [`${numericVal.toLocaleString()} MW (${extra})`, strName];
                 }
-                return [`${Number(val).toLocaleString()} MW`, name];
+                return [`${numericVal.toLocaleString()} MW`, strName];
               }}
             />
             <Legend verticalAlign="top" height={36} iconType="circle" />
@@ -118,6 +120,17 @@ export const HorizonChart: React.FC<HorizonChartProps> = ({ data, loading }) => 
               dot={false}
               isAnimationActive={false}
             />
+            {showDebiased && (
+              <Line
+                type="monotone"
+                dataKey="bias_adjusted_mw"
+                name="Bias-Adjusted Forecast (7d walk-forward)"
+                stroke="#f59e0b"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>

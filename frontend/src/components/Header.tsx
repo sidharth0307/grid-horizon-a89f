@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Sliders, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Download, Sliders, ShieldCheck, Zap } from 'lucide-react';
 import { getExportUrl } from '../services/api';
 
 interface HeaderProps {
@@ -9,6 +9,8 @@ interface HeaderProps {
   setDecisionDate: (d: string) => void;
   cutoff: string;
   setCutoff: (c: string) => void;
+  showDebiased: boolean;
+  setShowDebiased: (v: boolean) => void;
   coveragePct: number;
   pairedCount: number;
   totalCount: number;
@@ -21,6 +23,8 @@ export const Header: React.FC<HeaderProps> = ({
   setDecisionDate,
   cutoff,
   setCutoff,
+  showDebiased,
+  setShowDebiased,
   coveragePct,
   pairedCount,
   totalCount,
@@ -32,7 +36,8 @@ export const Header: React.FC<HeaderProps> = ({
     return d.toISOString().split('T')[0];
   }, [decisionDate]);
 
-  const isLeakageProne = cutoff === '11:00';
+  // Derive forecast run used based on publish cadence (07:30 vs 09:30)
+  const runUsed = cutoff === '09:20' ? '07:30 UTC Run' : '09:30 UTC Run';
 
   const exportUrl = React.useMemo(() => {
     if (viewMode === 'day' && decisionDate) {
@@ -53,17 +58,10 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="px-2.5 py-0.5 text-xs font-semibold rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
               Elexon BMRS
             </span>
-            {isLeakageProne ? (
-              <span className="px-2.5 py-0.5 text-xs font-medium rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1">
-                <AlertCircle className="w-3.5 h-3.5" />
-                Leakage Risk (11:00 Stale Pre-Brexit)
-              </span>
-            ) : (
-              <span className="px-2.5 py-0.5 text-xs font-medium rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-                <ShieldCheck className="w-3.5 h-3.5" />
-                Anti-Leakage Active ({cutoff} London)
-              </span>
-            )}
+            <span className="px-2.5 py-0.5 text-xs font-medium rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Gate Locked ({cutoff} UK • {runUsed})
+            </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
             Day-Ahead Wholesale Procurement Analysis • January 2026 Decisions (Delivery: 02 Jan – 01 Feb 2026)
@@ -110,7 +108,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
-          {/* Cutoff Selector */}
+          {/* Gate Cutoff Selector */}
           <div className="flex items-center bg-slate-800 rounded-lg p-1.5 border border-slate-700 text-xs">
             <Sliders className="w-3.5 h-3.5 text-slate-400 ml-1.5 mr-1" />
             <span className="text-slate-400 px-1 font-medium">Gate:</span>
@@ -119,11 +117,24 @@ export const Header: React.FC<HeaderProps> = ({
               onChange={(e) => setCutoff(e.target.value)}
               className="bg-slate-900 text-white rounded px-2 py-1 border border-slate-700 outline-none focus:border-sky-500"
             >
-              <option value="09:20">09:20 UK (EPEX Spot)</option>
-              <option value="09:50">09:50 UK (N2EX)</option>
-              <option value="11:00">11:00 UK (Historical/Stale)</option>
+              <option value="09:20">09:20 UK (EPEX Spot • 07:30 run)</option>
+              <option value="09:50">09:50 UK (N2EX • 09:30 run)</option>
+              <option value="11:00">11:00 UK (Historical • 09:30 run)</option>
             </select>
           </div>
+
+          {/* 7-day Walk-forward Debias Toggle */}
+          <button
+            onClick={() => setShowDebiased(!showDebiased)}
+            className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors ${
+              showDebiased
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            {showDebiased ? 'Bias-Adjusted ON (−20% MAE)' : 'Debias Overlay'}
+          </button>
 
           {/* Coverage Badge */}
           <div className="text-xs px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300">

@@ -2,6 +2,7 @@ export interface TimeSeriesPoint {
   startTime: string;
   actual_mw: number | null;
   forecast_mw: number | null;
+  bias_adjusted_mw?: number | null;
   publishTime?: string | null;
   error_mw: number | null;
   abs_error_mw: number | null;
@@ -23,6 +24,8 @@ export interface KPIResponse {
   p90_error_mw: number | null;
   persistence_mae_mw: number | null;
   skill_score_pct: number | null;
+  debiased_mae_mw?: number | null;
+  debiased_improvement_pct?: number | null;
 }
 
 export interface HorizonBreakdownItem {

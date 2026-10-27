@@ -43,7 +43,7 @@ export const HorizonBreakdown: React.FC<HorizonBreakdownProps> = ({ breakdown, l
                 borderRadius: '8px',
                 fontSize: '12px',
               }}
-              formatter={(val: any, name: any) => [`${Number(val).toLocaleString()} MW`, name]}
+              formatter={(val: unknown, name: unknown) => [`${Number(val).toLocaleString()} MW`, String(name)]}
             />
             <Legend verticalAlign="top" height={36} iconType="circle" />
             <Bar dataKey="mae_mw" name="Mean Absolute Error (MW)" fill="#38bdf8" isAnimationActive={false} />

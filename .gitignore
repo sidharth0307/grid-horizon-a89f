@@ -7,6 +7,10 @@ venv/
 ENV/
 *.sqlite3-journal
 
+# Testing & CSV Artifacts
+*.csv
+test_export.csv
+
 # Node / React
 node_modules/
 dist/

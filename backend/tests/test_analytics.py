@@ -50,7 +50,8 @@ def test_sign_convention_shortfall_risk():
             "error_mw": 300.0,
             "abs_error_mw": 300.0,
             "persist_actual_mw": 900.0,
-            "persist_error_mw": 100.0
+            "persist_error_mw": 100.0,
+            "bias_adj_error_mw": 250.0
         }
     ])
     metrics = compute_metrics(df)
@@ -110,3 +111,20 @@ def test_persistence_missing_when_lookup_actual_absent():
     fc = _fc([("2026-01-02 08:00:00+00:00", "2026-01-03 10:00:00+00:00", 4400.0)])
     m = build_aligned_timeseries(act, align_forecasts_as_of(fc))
     assert m["persist_actual_mw"].isna().all()
+
+def test_golden_regression_snapshot_numbers():
+    """Asserts headline numbers from the committed January 2026 snapshot."""
+    from app.services.engine import load_data_from_db, compute_metrics, parse_time_str
+    df_act, df_fc = load_data_from_db("2026-01-02T00:00:00Z", "2026-02-01T23:30:00Z")
+    aligned = align_forecasts_as_of(df_fc, gate_closure=parse_time_str("09:20"))
+    merged = build_aligned_timeseries(df_act, aligned, "2026-01-02T00:00:00Z", "2026-02-01T23:30:00Z")
+    m = compute_metrics(merged)
+    
+    # Golden assertions protecting README and video quotes
+    assert m["total_periods"] == 1488
+    assert m["paired_periods"] == 1488
+    assert m["coverage_pct"] == 100.0
+    assert m["mae_mw"] == 2041.96
+    assert m["mean_bias_mw"] == 1747.89
+    assert m["p90_error_mw"] == 4341.0
+    assert m["skill_score_pct"] == 53.0

@@ -97,6 +97,7 @@ def get_series(
             startTime=str(row["startTime"].isoformat()),
             actual_mw=row["actual_mw"],
             forecast_mw=row["forecast_mw"],
+            bias_adjusted_mw=row["bias_adjusted_mw"] if "bias_adjusted_mw" in row and pd.notna(row["bias_adjusted_mw"]) else None,
             publishTime=str(row["publishTime"].isoformat()) if "publishTime" in row and pd.notna(row["publishTime"]) else None,
             error_mw=row["error_mw"],
             abs_error_mw=row["abs_error_mw"],

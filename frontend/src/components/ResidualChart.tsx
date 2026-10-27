@@ -70,7 +70,7 @@ export const ResidualChart: React.FC<ResidualChartProps> = ({ data, loading }) =
                 borderRadius: '8px',
                 fontSize: '12px',
               }}
-              formatter={(val: any) => [
+              formatter={(val: unknown) => [
                 `${Number(val).toLocaleString()} MW`,
                 Number(val) > 0 ? 'Deficit (Shortfall)' : 'Surplus',
               ]}

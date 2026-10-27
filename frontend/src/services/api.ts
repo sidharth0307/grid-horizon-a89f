@@ -1,13 +1,11 @@
 import type { HorizonBreakdownItem, KPIResponse, MetaResponse, TimeSeriesPoint } from '../types/api';
 
-// If VITE_API_BASE_URL is set (e.g. Vercel -> Render), use it.
-// Otherwise, empty string routes to relative /api which NGINX or Vite proxy handles.
 const API_BASE = import.meta.env.VITE_API_BASE_URL !== undefined 
   ? import.meta.env.VITE_API_BASE_URL 
   : (import.meta.env.DEV ? 'http://localhost:8000' : '');
 
-export async function fetchMeta(): Promise<MetaResponse> {
-  const res = await fetch(`${API_BASE}/api/meta`);
+export async function fetchMeta(signal?: AbortSignal): Promise<MetaResponse> {
+  const res = await fetch(`${API_BASE}/api/meta`, { signal });
   if (!res.ok) throw new Error(`Failed to fetch metadata (${res.status})`);
   return res.json();
 }
@@ -15,13 +13,14 @@ export async function fetchMeta(): Promise<MetaResponse> {
 export async function fetchMetrics(
   dateFrom?: string,
   dateTo?: string,
-  cutoff: string = '09:20'
+  cutoff: string = '09:20',
+  signal?: AbortSignal
 ): Promise<KPIResponse> {
   const params = new URLSearchParams({ gate_cutoff: cutoff });
   if (dateFrom) params.append('date_from', dateFrom);
   if (dateTo) params.append('date_to', dateTo);
 
-  const res = await fetch(`${API_BASE}/api/metrics?${params.toString()}`);
+  const res = await fetch(`${API_BASE}/api/metrics?${params.toString()}`, { signal });
   if (!res.ok) throw new Error(`Failed to fetch metrics (${res.status})`);
   return res.json();
 }
@@ -29,13 +28,14 @@ export async function fetchMetrics(
 export async function fetchSeries(
   dateFrom?: string,
   dateTo?: string,
-  cutoff: string = '09:20'
+  cutoff: string = '09:20',
+  signal?: AbortSignal
 ): Promise<TimeSeriesPoint[]> {
   const params = new URLSearchParams({ gate_cutoff: cutoff });
   if (dateFrom) params.append('date_from', dateFrom);
   if (dateTo) params.append('date_to', dateTo);
 
-  const res = await fetch(`${API_BASE}/api/series?${params.toString()}`);
+  const res = await fetch(`${API_BASE}/api/series?${params.toString()}`, { signal });
   if (!res.ok) throw new Error(`Failed to fetch time series (${res.status})`);
   return res.json();
 }
@@ -43,13 +43,14 @@ export async function fetchSeries(
 export async function fetchBreakdown(
   dateFrom?: string,
   dateTo?: string,
-  cutoff: string = '09:20'
+  cutoff: string = '09:20',
+  signal?: AbortSignal
 ): Promise<HorizonBreakdownItem[]> {
   const params = new URLSearchParams({ gate_cutoff: cutoff });
   if (dateFrom) params.append('date_from', dateFrom);
   if (dateTo) params.append('date_to', dateTo);
 
-  const res = await fetch(`${API_BASE}/api/breakdown?${params.toString()}`);
+  const res = await fetch(`${API_BASE}/api/breakdown?${params.toString()}`, { signal });
   if (!res.ok) throw new Error(`Failed to fetch breakdown (${res.status})`);
   return res.json();
 }

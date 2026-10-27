@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Header } from './components/Header';
 import { MetricCards } from './components/MetricCards';
 import { HorizonChart } from './components/HorizonChart';
@@ -12,6 +12,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState<'month' | 'day'>('month');
   const [decisionDate, setDecisionDate] = useState<string>('2026-01-14');
   const [cutoff, setCutoff] = useState<string>('09:20');
+  const [showDebiased, setShowDebiased] = useState<boolean>(false);
 
   const [metrics, setMetrics] = useState<KPIResponse | null>(null);
   const [series, setSeries] = useState<TimeSeriesPoint[]>([]);
@@ -19,7 +20,7 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  async function loadData() {
+  const loadData = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError(null);
     try {
@@ -33,31 +34,36 @@ export default function App() {
         dateFrom = `${deliveryDay}T00:00:00Z`;
         dateTo = `${deliveryDay}T23:30:00Z`;
       } else {
-        // Full January Decision scope: physical delivery 2026-01-02 to 2026-02-01
         dateFrom = '2026-01-02T00:00:00Z';
         dateTo = '2026-02-01T23:30:00Z';
       }
 
       const [kpiRes, seriesRes, breakdownRes] = await Promise.all([
-        fetchMetrics(dateFrom, dateTo, cutoff),
-        fetchSeries(dateFrom, dateTo, cutoff),
-        fetchBreakdown(dateFrom, dateTo, cutoff),
+        fetchMetrics(dateFrom, dateTo, cutoff, signal),
+        fetchSeries(dateFrom, dateTo, cutoff, signal),
+        fetchBreakdown(dateFrom, dateTo, cutoff, signal),
       ]);
 
       setMetrics(kpiRes);
       setSeries(seriesRes);
       setBreakdown(breakdownRes);
-    } catch (err: any) {
-      console.error('Failed to load dashboard data:', err);
-      setError(err?.message || 'Failed to connect to analytics backend.');
+    } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return; // Request was aborted by newer filter action
+      }
+      const message = err instanceof Error ? err.message : 'Failed to connect to analytics backend.';
+      console.error('Failed to load dashboard data:', message);
+      setError(message);
     } finally {
       setLoading(false);
     }
-  }
+  }, [viewMode, decisionDate, cutoff]);
 
   useEffect(() => {
-    loadData();
-  }, [viewMode, decisionDate, cutoff]);
+    const controller = new AbortController();
+    loadData(controller.signal);
+    return () => controller.abort();
+  }, [loadData]);
 
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans">
@@ -68,6 +74,8 @@ export default function App() {
         setDecisionDate={setDecisionDate}
         cutoff={cutoff}
         setCutoff={setCutoff}
+        showDebiased={showDebiased}
+        setShowDebiased={setShowDebiased}
         coveragePct={metrics?.coverage_pct ?? 100}
         pairedCount={metrics?.paired_periods ?? 0}
         totalCount={metrics?.total_periods ?? 0}
@@ -81,7 +89,7 @@ export default function App() {
               <span className="text-sm">{error}</span>
             </div>
             <button
-              onClick={loadData}
+              onClick={() => loadData()}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-xs font-semibold text-white transition-colors"
             >
               <RefreshCw className="w-3.5 h-3.5" /> Retry
@@ -93,7 +101,7 @@ export default function App() {
         <MetricCards metrics={metrics} loading={loading} />
 
         {/* Forecast vs Outturn Line Chart */}
-        <HorizonChart data={series} loading={loading} />
+        <HorizonChart data={series} loading={loading} showDebiased={showDebiased} />
 
         {/* Residual Shortfall/Surplus Bar Chart */}
         <ResidualChart data={series} loading={loading} />
