@@ -1,6 +1,14 @@
+"""Day-ahead alignment and forecast-error analytics.
+
+Convention everywhere: error = forecast - actual.
+Positive error = over-forecast = shortfall the desk must buy in balancing markets.
+"""
+from __future__ import annotations
+
 from datetime import date, datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 
@@ -8,8 +16,21 @@ from app.database import get_db_connection
 
 LONDON = ZoneInfo("Europe/London")
 
+PERSISTENCE_LAG = pd.Timedelta(hours=48)  # always known at D-1 gate closure
+DEBIAS_WINDOW_DAYS = 7                    # trailing window of delivery days
+DEBIAS_LAG_DAYS = 2                       # actuals are final only through D-2 at D-1 gate closure
+DEBIAS_MIN_PERIODS = 48                   # require at least one day of finalised errors
+WARMUP_DAYS = 10                          # history loaded before date_from for baselines
+
+ALIGNED_COLUMNS = [
+    "startTime", "actual_mw", "forecast_mw", "publishTime", "horizon_h",
+    "error_mw", "abs_error_mw", "persist_actual_mw", "persist_error_mw",
+    "delivery_date", "trailing_bias", "bias_adjusted_mw", "bias_adj_error_mw",
+]
+
+
 def parse_time_str(time_str: str) -> time:
-    """Parses 'HH:MM' string into a datetime.time object. Raises ValueError on invalid format."""
+    """Parse 'HH:MM' into a datetime.time. Raises ValueError on invalid input."""
     parts = time_str.strip().split(":")
     if len(parts) != 2:
         raise ValueError("Time must be in HH:MM format")
@@ -18,257 +39,250 @@ def parse_time_str(time_str: str) -> time:
         raise ValueError("Hour must be 0-23 and minute must be 0-59")
     return time(h, m)
 
+
 def cutoff_utc(delivery_day: date, gate: time) -> pd.Timestamp:
-    """Computes exact UTC timestamp corresponding to local D-1 gate closure in Europe/London."""
+    """UTC instant of the D-1 gate closure (gate is Europe/London wall-clock time)."""
     local_cutoff = datetime.combine(delivery_day - timedelta(days=1), gate, tzinfo=LONDON)
     return pd.Timestamp(local_cutoff).tz_convert("UTC")
 
-def load_data_from_db(date_from: Optional[str] = None, date_to: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Reads raw actuals and forecasts from SQLite."""
+
+def load_data_from_db(
+    date_from: Optional[str] = None, date_to: Optional[str] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Read raw actuals and forecasts, keeping WARMUP_DAYS of history before date_from."""
     conn = get_db_connection()
-    
-    query_act = "SELECT start_time as startTime, generation_mw as generation FROM actual_generation"
-    query_fc = "SELECT publish_time as publishTime, start_time as startTime, generation_mw as generation FROM forecast_generation"
-    
-    df_act = pd.read_sql_query(query_act, conn)
-    df_fc = pd.read_sql_query(query_fc, conn)
-    conn.close()
-    
+    try:
+        df_act = pd.read_sql_query(
+            "SELECT start_time AS startTime, generation_mw AS generation FROM actual_generation", conn
+        )
+        df_fc = pd.read_sql_query(
+            "SELECT publish_time AS publishTime, start_time AS startTime, generation_mw AS generation "
+            "FROM forecast_generation",
+            conn,
+        )
+    finally:
+        conn.close()
+
     df_act["startTime"] = pd.to_datetime(df_act["startTime"], utc=True)
     df_fc["publishTime"] = pd.to_datetime(df_fc["publishTime"], utc=True)
     df_fc["startTime"] = pd.to_datetime(df_fc["startTime"], utc=True)
-    
-    # Keep 10 days of historical actuals and forecasts before start_ts to calculate trailing bias
-    if date_from:
-        start_ts = pd.to_datetime(date_from, utc=True)
-        df_act_filtered = df_act[df_act["startTime"] >= (start_ts - pd.Timedelta(days=10))]
-        df_fc_filtered = df_fc[df_fc["startTime"] >= (start_ts - pd.Timedelta(days=10))]
-    else:
-        df_act_filtered = df_act
-        df_fc_filtered = df_fc
 
+    if date_from:
+        floor = pd.to_datetime(date_from, utc=True) - pd.Timedelta(days=WARMUP_DAYS)
+        df_act = df_act[df_act["startTime"] >= floor]
+        df_fc = df_fc[df_fc["startTime"] >= floor]
     if date_to:
         end_ts = pd.to_datetime(date_to, utc=True)
-        df_act_filtered = df_act_filtered[df_act_filtered["startTime"] <= end_ts]
-        df_fc_filtered = df_fc_filtered[df_fc_filtered["startTime"] <= end_ts]
-        
-    return df_act_filtered, df_fc_filtered
+        df_act = df_act[df_act["startTime"] <= end_ts]
+        df_fc = df_fc[df_fc["startTime"] <= end_ts]
 
-def align_forecasts_as_of(
-    df_forecasts: pd.DataFrame, 
-    gate_closure: time = time(9, 20)
-) -> pd.DataFrame:
+    return df_act, df_fc
+
+
+def align_forecasts_as_of(df_forecasts: pd.DataFrame, gate_closure: time = time(9, 20)) -> pd.DataFrame:
+    """Latest forecast per target with publishTime <= D-1 gate closure (no lookahead).
+
+    WINDFOR is hourly: each hourly value is applied to both half-hour settlement periods
+    of its hour (step function). Ties on publishTime keep the last row in input order.
     """
-    Selects latest forecast published strictly on or before D-1 gate closure.
-    Expands hourly step-function targets to 30-minute settlement periods.
-    """
+    empty = pd.DataFrame(columns=["startTime", "publishTime", "forecast_mw", "horizon_h"])
     if df_forecasts.empty:
-        return pd.DataFrame(columns=["startTime", "publishTime", "forecast_mw", "horizon_h"])
+        return empty
 
     fc = df_forecasts.copy()
     fc["startTime"] = pd.to_datetime(fc["startTime"], utc=True)
     fc["publishTime"] = pd.to_datetime(fc["publishTime"], utc=True)
-    
+
     delivery_days = fc["startTime"].dt.tz_convert(LONDON).dt.date
     cutoffs = {d: cutoff_utc(d, gate_closure) for d in delivery_days.unique()}
     fc["cutoff_utc"] = delivery_days.map(cutoffs)
 
     eligible = fc.loc[fc["publishTime"] <= fc["cutoff_utc"]].copy()
     if eligible.empty:
-        return pd.DataFrame(columns=["startTime", "publishTime", "forecast_mw", "horizon_h"])
+        return empty
 
-    # Lead time in hours
     eligible["horizon_h"] = (eligible["startTime"] - eligible["publishTime"]).dt.total_seconds() / 3600.0
-
-    latest_fc = (
-        eligible.sort_values("publishTime")
+    latest = (
+        eligible.sort_values("publishTime", kind="stable")
         .drop_duplicates("startTime", keep="last")
-        .rename(columns={"generation": "forecast_mw"})
-        [["startTime", "publishTime", "forecast_mw", "horizon_h"]]
+        .rename(columns={"generation": "forecast_mw"})[["startTime", "publishTime", "forecast_mw", "horizon_h"]]
     )
 
-    # Hourly expansion: map :00 target to subsequent :30 settlement interval
-    if (latest_fc["startTime"].dt.minute == 0).all() and len(latest_fc) > 0:
-        fc_half_hour = latest_fc.copy()
-        fc_half_hour["startTime"] = fc_half_hour["startTime"] + pd.Timedelta(minutes=30)
-        fc_half_hour["horizon_h"] = fc_half_hour["horizon_h"] + 0.5
-        latest_fc = pd.concat([latest_fc, fc_half_hour]).sort_values("startTime").reset_index(drop=True)
+    if (latest["startTime"].dt.minute == 0).all():
+        second_half = latest.copy()
+        second_half["startTime"] = second_half["startTime"] + pd.Timedelta(minutes=30)
+        second_half["horizon_h"] = second_half["horizon_h"] + 0.5
+        latest = pd.concat([latest, second_half]).sort_values("startTime").reset_index(drop=True)
 
-    return latest_fc
+    return latest
+
+
+def add_walk_forward_debias(merged: pd.DataFrame) -> pd.DataFrame:
+    """Causal bias correction.
+
+    For delivery day d the correction is the mean error over delivery days
+    d-8 .. d-2 (7 days): at D-1 09:20 only actuals through D-2 are final.
+    With fewer than DEBIAS_MIN_PERIODS finalised errors there is no correction (NaN) -
+    never a whole-sample fallback, which would leak future data.
+    """
+    out = merged.copy()
+    out["delivery_date"] = out["startTime"].dt.tz_convert(LONDON).dt.date
+
+    errors = out.dropna(subset=["error_mw"])
+    daily = errors.groupby("delivery_date")["error_mw"].agg(["sum", "count"]) if not errors.empty else None
+
+    bias_by_day: Dict[date, float] = {}
+    for d in out["delivery_date"].unique():
+        bias = np.nan
+        if daily is not None:
+            days = [d - timedelta(days=k) for k in range(DEBIAS_LAG_DAYS, DEBIAS_LAG_DAYS + DEBIAS_WINDOW_DAYS)]
+            hist = daily.reindex(days).dropna()
+            n = hist["count"].sum() if not hist.empty else 0
+            if n >= DEBIAS_MIN_PERIODS:
+                bias = float(hist["sum"].sum() / n)
+        bias_by_day[d] = bias
+
+    out["trailing_bias"] = out["delivery_date"].map(bias_by_day).astype(float)
+    out["bias_adjusted_mw"] = (out["forecast_mw"] - out["trailing_bias"]).clip(lower=0.0)
+    out["bias_adj_error_mw"] = (out["bias_adjusted_mw"] - out["actual_mw"]).abs()
+    return out
+
 
 def build_aligned_timeseries(
-    df_actuals: pd.DataFrame, 
+    df_actuals: pd.DataFrame,
     df_aligned_forecasts: pd.DataFrame,
     date_from: Optional[str] = None,
-    date_to: Optional[str] = None
+    date_to: Optional[str] = None,
 ) -> pd.DataFrame:
-    """
-    Outer join actuals and forecasts.
-    Calculates:
-      1. 48h lag persistence baseline (no same-day leakage)
-      2. 7-day walk-forward debiaser using only finalized history (D-2 and older)
-    """
+    """Outer-join actuals and as-of forecasts, then add persistence and debias columns."""
     if df_actuals.empty and df_aligned_forecasts.empty:
-        return pd.DataFrame(columns=["startTime", "actual_mw", "forecast_mw", "publishTime", "error_mw", "abs_error_mw", "horizon_h", "bias_adjusted_mw"])
+        return pd.DataFrame(columns=ALIGNED_COLUMNS)
 
     act = df_actuals.rename(columns={"generation": "actual_mw"}).copy()
+    fc = df_aligned_forecasts.copy()
     if not act.empty:
         act["startTime"] = pd.to_datetime(act["startTime"], utc=True)
-
-    fc = df_aligned_forecasts.copy()
+        act = act.drop_duplicates("startTime", keep="last")
     if not fc.empty:
         fc["startTime"] = pd.to_datetime(fc["startTime"], utc=True)
 
-    merged = pd.merge(act, fc, on="startTime", how="outer").sort_values("startTime")
-    
-    # Error convention: Forecast - Actual
-    # Positive (> 0): Over-forecast -> Shortfall Risk
+    merged = pd.merge(act, fc, on="startTime", how="outer").sort_values("startTime").reset_index(drop=True)
     merged["error_mw"] = merged["forecast_mw"] - merged["actual_mw"]
     merged["abs_error_mw"] = merged["error_mw"].abs()
-    
-    # 48-Hour Persistence: match startTime exactly to (startTime - 48h)
-    act_lookup = act[["startTime", "actual_mw"]].rename(
+
+    # 48 h persistence: actual at (startTime - 48 h), matched on timestamp not row position
+    lookup = act[["startTime", "actual_mw"]].rename(
         columns={"actual_mw": "persist_actual_mw", "startTime": "lookup_time"}
     )
-    merged["lookup_time"] = merged["startTime"] - pd.Timedelta(hours=48)
-    merged = pd.merge(merged, act_lookup, on="lookup_time", how="left").drop(columns=["lookup_time"])
+    merged["lookup_time"] = merged["startTime"] - PERSISTENCE_LAG
+    merged = pd.merge(merged, lookup, on="lookup_time", how="left").drop(columns=["lookup_time"])
     merged["persist_error_mw"] = (merged["persist_actual_mw"] - merged["actual_mw"]).abs()
 
-    # Walk-forward 7-day debiaser using strictly finalized D-2 history:
-    # At gate closure D-1 09:20, actuals are only finalized through D-2 23:30.
-    # We compute trailing mean error over [t - 9 days, t - 2 days] (7 full days)
-    merged["delivery_date"] = merged["startTime"].dt.date
-    unique_dates = sorted(merged["delivery_date"].unique())
-    daily_bias_map = {}
+    merged = add_walk_forward_debias(merged)
 
-    # Calculate global prior mean bias as sensible default if history window is short
-    all_paired_errors = merged.dropna(subset=["error_mw"])["error_mw"]
-    default_bias = float(all_paired_errors.mean()) if not all_paired_errors.empty else 1748.0
-    
-    for d in unique_dates:
-        hist_start = pd.Timestamp(d - timedelta(days=9), tz="UTC")
-        hist_end = pd.Timestamp(d - timedelta(days=2), tz="UTC") + pd.Timedelta(hours=23, minutes=30)
-        hist_df = merged[(merged["startTime"] >= hist_start) & (merged["startTime"] <= hist_end)]
-        hist_paired = hist_df.dropna(subset=["error_mw"])
-        if len(hist_paired) >= 24: # At least 12-24 hours of finalized history
-            daily_bias_map[d] = float(hist_paired["error_mw"].mean())
-        else:
-            daily_bias_map[d] = default_bias
-
-    merged["trailing_bias"] = merged["delivery_date"].map(daily_bias_map).fillna(default_bias)
-    # Clip at 0 so adjusted forecast cannot physically be negative MW
-    merged["bias_adjusted_mw"] = (merged["forecast_mw"] - merged["trailing_bias"]).clip(lower=0.0)
-    merged["bias_adj_error_mw"] = (merged["bias_adjusted_mw"] - merged["actual_mw"]).abs()
-
-    # Filter to requested evaluation scope
     if date_from:
         merged = merged[merged["startTime"] >= pd.to_datetime(date_from, utc=True)]
     if date_to:
         merged = merged[merged["startTime"] <= pd.to_datetime(date_to, utc=True)]
-        
     return merged
 
+
+def _null_metrics(total_periods: int) -> Dict:
+    return {
+        "total_periods": total_periods, "paired_periods": 0, "coverage_pct": 0.0,
+        "mae_mw": None, "rmse_mw": None, "mean_bias_mw": None, "wape_pct": None,
+        "over_forecast_share_pct": None,
+        "max_shortfall_risk_mw": None, "max_surplus_mw": None,
+        "p10_error_mw": None, "p50_error_mw": None, "p90_error_mw": None,
+        "persistence_mae_mw": None, "skill_score_pct": None,
+        "debiased_mae_mw": None, "debiased_improvement_pct": None, "debiased_periods": 0,
+    }
+
+
 def compute_metrics(df: pd.DataFrame) -> Dict:
-    """Computes comprehensive error KPIs, P90 reserve buffer, and debiased performance."""
+    """Error KPIs, P90 shortfall buffer, persistence skill and walk-forward debias result."""
     total_periods = len(df)
     paired = df.dropna(subset=["actual_mw", "forecast_mw"])
     valid_count = len(paired)
-    
     if valid_count == 0:
-        return {
-            "total_periods": total_periods,
-            "paired_periods": 0,
-            "coverage_pct": 0.0,
-            "mae_mw": None,
-            "rmse_mw": None,
-            "mean_bias_mw": None,
-            "wape_pct": None,
-            "max_shortfall_risk_mw": None,
-            "max_surplus_mw": None,
-            "p10_error_mw": None,
-            "p50_error_mw": None,
-            "p90_error_mw": None,
-            "persistence_mae_mw": None,
-            "skill_score_pct": None,
-            "debiased_mae_mw": None,
-            "debiased_improvement_pct": None
-        }
+        return _null_metrics(total_periods)
 
     actual_sum = float(paired["actual_mw"].sum())
-    abs_err_sum = float(paired["abs_error_mw"].sum())
     mae = float(paired["abs_error_mw"].mean())
     rmse = float(np.sqrt((paired["error_mw"] ** 2).mean()))
     bias = float(paired["error_mw"].mean())
-    wape = round((abs_err_sum / actual_sum * 100), 2) if actual_sum > 0 else None
-    
-    # Forward-Looking P90 Deficit Buffer (positive errors = shortfall events)
-    positive_errors = paired.loc[paired["error_mw"] > 0, "error_mw"]
-    p90_buffer = round(float(np.percentile(positive_errors, 90)), 2) if len(positive_errors) > 0 else 0.0
+    wape = round(float(paired["abs_error_mw"].sum()) / actual_sum * 100, 2) if actual_sum > 0 else None
+    over_share = round(float((paired["error_mw"] > 0).mean()) * 100, 1)
 
-    # Persistence evaluation on identical matched periods
-    persist_eval = paired.dropna(subset=["persist_actual_mw"])
-    persist_mae = float(persist_eval["persist_error_mw"].mean()) if not persist_eval.empty else None
-    model_mae_matched = float(persist_eval["abs_error_mw"].mean()) if not persist_eval.empty else None
-    skill_score = (
-        round((1 - (model_mae_matched / persist_mae)) * 100, 2)
-        if (persist_mae and model_mae_matched and persist_mae > 0)
-        else None
-    )
+    # P90 of shortfall events only (positive errors)
+    positive = paired.loc[paired["error_mw"] > 0, "error_mw"]
+    p90_buffer = round(float(np.percentile(positive, 90)), 2) if len(positive) > 0 else 0.0
 
-    # 7-day walk-forward debiased evaluation (defensive check for test fixtures)
-    debiased_mae = None
-    debiased_impr = None
+    # Persistence skill, on identical periods
+    persist_mae = model_mae_matched = skill = None
+    if "persist_actual_mw" in paired.columns:
+        pe = paired.dropna(subset=["persist_actual_mw"])
+        if not pe.empty:
+            persist_mae = float(pe["persist_error_mw"].mean())
+            model_mae_matched = float(pe["abs_error_mw"].mean())
+            if persist_mae > 0:
+                skill = round((1 - model_mae_matched / persist_mae) * 100, 2)
+
+    # Walk-forward debias, compared with raw MAE on the same periods
+    debiased_mae = debiased_impr = None
+    debiased_n = 0
     if "bias_adj_error_mw" in paired.columns:
-        debiased_eval = paired.dropna(subset=["bias_adj_error_mw"])
-        if not debiased_eval.empty:
-            debiased_mae = float(debiased_eval["bias_adj_error_mw"].mean())
-            if mae > 0:
-                debiased_impr = round((1 - (debiased_mae / mae)) * 100, 2)
+        de = paired.dropna(subset=["bias_adj_error_mw"])
+        debiased_n = len(de)
+        if debiased_n:
+            debiased_mae = float(de["bias_adj_error_mw"].mean())
+            raw_same_rows = float(de["abs_error_mw"].mean())
+            if raw_same_rows > 0:
+                debiased_impr = round((1 - debiased_mae / raw_same_rows) * 100, 2)
 
     return {
         "total_periods": total_periods,
         "paired_periods": valid_count,
-        "coverage_pct": round((valid_count / total_periods) * 100, 2) if total_periods > 0 else 0.0,
+        "coverage_pct": round(valid_count / total_periods * 100, 2) if total_periods else 0.0,
         "mae_mw": round(mae, 2),
         "rmse_mw": round(rmse, 2),
         "mean_bias_mw": round(bias, 2),
         "wape_pct": wape,
+        "over_forecast_share_pct": over_share,
         "max_shortfall_risk_mw": round(float(paired["error_mw"].max()), 2),
         "max_surplus_mw": round(float(paired["error_mw"].min()), 2),
         "p10_error_mw": round(float(np.percentile(paired["error_mw"], 10)), 2),
         "p50_error_mw": round(float(np.percentile(paired["error_mw"], 50)), 2),
         "p90_error_mw": p90_buffer,
-        "persistence_mae_mw": round(persist_mae, 2) if persist_mae else None,
-        "skill_score_pct": skill_score,
-        "debiased_mae_mw": round(debiased_mae, 2) if debiased_mae else None,
-        "debiased_improvement_pct": debiased_impr
+        "persistence_mae_mw": round(persist_mae, 2) if persist_mae is not None else None,
+        "skill_score_pct": skill,
+        "debiased_mae_mw": round(debiased_mae, 2) if debiased_mae is not None else None,
+        "debiased_improvement_pct": debiased_impr,
+        "debiased_periods": debiased_n,
     }
 
+
 def compute_horizon_breakdown(df: pd.DataFrame) -> List[Dict]:
-    """Computes error statistics grouped by physical delivery block in Europe/London."""
+    """Error by delivery block (Europe/London). With a fixed gate, block and lead time are tied together."""
     paired = df.dropna(subset=["actual_mw", "forecast_mw"]).copy()
     if paired.empty:
         return []
-    
+
     paired["delivery_hour"] = paired["startTime"].dt.tz_convert(LONDON).dt.hour
-    
-    # Wholesale settlement blocks
     bins = [0, 7, 13, 19, 24]
     labels = ["Overnight (00-06)", "Morning Ramp (07-12)", "Afternoon (13-18)", "Evening Peak (19-23)"]
     paired["period_block"] = pd.cut(paired["delivery_hour"], bins=bins, labels=labels, right=False)
-    
+
     breakdown = []
     for block_name, group in paired.groupby("period_block", observed=False):
         if len(group) == 0:
             continue
-        mae = float(group["abs_error_mw"].mean())
-        bias = float(group["error_mw"].mean())
-        avg_lead_time = float(group["horizon_h"].mean()) if "horizon_h" in group else 0.0
+        lead = float(group["horizon_h"].mean()) if "horizon_h" in group else 0.0
         breakdown.append({
             "horizon_bucket": str(block_name),
-            "mae_mw": round(mae, 2),
-            "bias_mw": round(bias, 2),
-            "avg_lead_time_h": round(avg_lead_time, 1),
-            "count": len(group)
+            "mae_mw": round(float(group["abs_error_mw"].mean()), 2),
+            "bias_mw": round(float(group["error_mw"].mean()), 2),
+            "avg_lead_time_h": round(lead, 1),
+            "count": len(group),
         })
     return breakdown
