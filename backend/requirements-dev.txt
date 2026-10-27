@@ -1,0 +1,5 @@
+# Development: tests, linting and the Elexon ingest script
+-r requirements.txt
+httpx>=0.27,<1.0
+pytest>=8.0,<10
+ruff>=0.6,<1.0

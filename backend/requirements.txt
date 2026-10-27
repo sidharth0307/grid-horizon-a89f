@@ -1,8 +1,6 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
-pydantic>=2.6.0
-pandas>=2.2.0
-numpy>=1.26.0
-httpx>=0.27.0
-pytest>=8.0.0
-python-dateutil>=2.9.0
+# Runtime dependencies for the API (what the Docker image installs)
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.7,<3
+pandas>=2.2.3,<4
+numpy>=1.26,<3

@@ -23,3 +23,6 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+# Tooling caches
+.ruff_cache/
+.pytest_cache/

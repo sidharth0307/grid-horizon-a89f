@@ -2,5 +2,9 @@
 __pycache__
 *.pyc
 .pytest_cache
+.ruff_cache
 tests
-scripts/diagnostics.py
+scripts
+requirements-dev.txt
+ruff.toml
+data/*.tmp

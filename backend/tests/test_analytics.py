@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, time
+from datetime import time
 import pandas as pd
 from fastapi.testclient import TestClient
 from app.main import app
@@ -114,7 +114,7 @@ def test_persistence_missing_when_lookup_actual_absent():
 
 def test_golden_regression_snapshot_numbers():
     """Asserts headline numbers from the committed January 2026 snapshot."""
-    from app.services.engine import load_data_from_db, compute_metrics, parse_time_str
+    from app.services.engine import load_data_from_db, compute_metrics
     df_act, df_fc = load_data_from_db("2026-01-02T00:00:00Z", "2026-02-01T23:30:00Z")
     aligned = align_forecasts_as_of(df_fc, gate_closure=parse_time_str("09:20"))
     merged = build_aligned_timeseries(df_act, aligned, "2026-01-02T00:00:00Z", "2026-02-01T23:30:00Z")
