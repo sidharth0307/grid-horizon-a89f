@@ -1,105 +1,107 @@
 import React from 'react';
-import { Download, Sliders, ShieldCheck, Zap } from 'lucide-react';
+import { AlertTriangle, Download, ShieldCheck, Sliders, Zap } from 'lucide-react';
 import { getExportUrl } from '../services/api';
+import type { KPIResponse } from '../types/api';
+import { DECISION_MAX, DECISION_MIN, deliveryDateFor, isValidDecisionDate, windowFor } from '../lib/dates';
+import type { ViewMode } from '../lib/dates';
+import { GATES, gateFor } from '../lib/gates';
+import { DASH, formatMaeChange, formatPct } from '../lib/format';
 
 interface HeaderProps {
-  viewMode: 'month' | 'day';
-  setViewMode: (mode: 'month' | 'day') => void;
+  viewMode: ViewMode;
+  onViewModeChange: (mode: ViewMode) => void;
   decisionDate: string;
-  setDecisionDate: (d: string) => void;
+  onDecisionDateChange: (date: string) => void;
   cutoff: string;
-  setCutoff: (c: string) => void;
+  onCutoffChange: (cutoff: string) => void;
   showDebiased: boolean;
-  setShowDebiased: (v: boolean) => void;
-  coveragePct: number;
-  pairedCount: number;
-  totalCount: number;
+  onToggleDebiased: () => void;
+  metrics: KPIResponse | null;
+  /** Forecast issue time (London clock) actually used by most periods in view. */
+  runLabel: string | null;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   viewMode,
-  setViewMode,
+  onViewModeChange,
   decisionDate,
-  setDecisionDate,
+  onDecisionDateChange,
   cutoff,
-  setCutoff,
+  onCutoffChange,
   showDebiased,
-  setShowDebiased,
-  coveragePct,
-  pairedCount,
-  totalCount,
+  onToggleDebiased,
+  metrics,
+  runLabel,
 }) => {
-  const deliveryDate = React.useMemo(() => {
-    if (!decisionDate) return '';
-    const d = new Date(decisionDate);
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().split('T')[0];
-  }, [decisionDate]);
+  const gate = gateFor(cutoff);
+  const deliveryDate = isValidDecisionDate(decisionDate) ? deliveryDateFor(decisionDate) : DASH;
+  const { dateFrom, dateTo } = windowFor(viewMode, decisionDate);
+  const exportUrl = getExportUrl(dateFrom, dateTo, cutoff);
 
-  // Derive forecast run used based on publish cadence (07:30 vs 09:30)
-  const runUsed = cutoff === '09:20' ? '07:30 UTC Run' : '09:30 UTC Run';
-
-  const exportUrl = React.useMemo(() => {
-    if (viewMode === 'day' && decisionDate) {
-      return getExportUrl(`${deliveryDate}T00:00:00Z`, `${deliveryDate}T23:30:00Z`, cutoff);
-    }
-    return getExportUrl('2026-01-02T00:00:00Z', '2026-02-01T23:30:00Z', cutoff);
-  }, [viewMode, decisionDate, deliveryDate, cutoff]);
+  const improvement = metrics?.debiased_improvement_pct ?? null;
+  const debiasedPeriods = metrics?.debiased_periods ?? 0;
+  const debiasAvailable = improvement !== null && debiasedPeriods > 0;
+  const debiasLabel = !debiasAvailable
+    ? 'Bias adjustment unavailable'
+    : `${showDebiased ? 'Bias-adjusted ON' : 'Show bias-adjusted'} (${formatMaeChange(improvement)})`;
+  const debiasHint = debiasAvailable
+    ? `Subtracts the trailing 7-day mean error (delivery days D-8 to D-2, all known at gate closure). Measured on the ${debiasedPeriods.toLocaleString('en-GB')} periods with enough history.`
+    : 'Not enough finalised history for this selection.';
 
   return (
     <header className="bg-slate-900 border-b border-slate-800 px-6 py-4 sticky top-0 z-50">
       <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        {/* Brand & Market Context */}
         <div>
           <div className="flex flex-wrap items-center gap-2.5">
-            <h1 className="text-xl font-bold text-white tracking-tight">
-              UK Wind Horizon Evaluation
-            </h1>
+            <h1 className="text-xl font-bold text-white tracking-tight">UK Wind Forecast Evaluation</h1>
             <span className="px-2.5 py-0.5 text-xs font-semibold rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
               Elexon BMRS
             </span>
-            <span className="px-2.5 py-0.5 text-xs font-medium rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5" />
-              Gate Locked ({cutoff} UK • {runUsed})
+            <span
+              title={gate.description}
+              className={`px-2.5 py-0.5 text-xs font-medium rounded border flex items-center gap-1 ${
+                gate.legacy
+                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+              }`}
+            >
+              {gate.legacy ? <AlertTriangle className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+              {gate.legacy ? 'Legacy gate' : 'Gate locked'} {cutoff} UK · forecast run {runLabel ?? DASH} UK on D-1
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Day-Ahead Wholesale Procurement Analysis • January 2026 Decisions (Delivery: 02 Jan – 01 Feb 2026)
+            Day-ahead wholesale procurement analysis · decisions made 1–31 Jan 2026 (delivery 2 Jan – 1 Feb 2026)
           </p>
         </div>
 
-        {/* Filter Controls */}
         <div className="flex flex-wrap items-center gap-3">
-          {/* Mode Switcher */}
-          <div className="flex bg-slate-800 rounded-lg p-1 border border-slate-700 text-xs">
-            <button
-              onClick={() => setViewMode('month')}
-              className={`px-3 py-1 rounded font-medium transition-colors ${
-                viewMode === 'month' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Full Month (1,488 SPs)
-            </button>
-            <button
-              onClick={() => setViewMode('day')}
-              className={`px-3 py-1 rounded font-medium transition-colors ${
-                viewMode === 'day' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Single Day (48 SPs)
-            </button>
+          <div className="flex bg-slate-800 rounded-lg p-1 border border-slate-700 text-xs" role="group" aria-label="View mode">
+            {(['month', 'day'] as const).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => onViewModeChange(mode)}
+                aria-pressed={viewMode === mode}
+                className={`px-3 py-1 rounded font-medium transition-colors ${
+                  viewMode === mode ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {mode === 'month' ? 'Full month' : 'Single day'}
+              </button>
+            ))}
           </div>
 
-          {/* Single Day Filter */}
           {viewMode === 'day' && (
             <div className="flex items-center bg-slate-800 rounded-lg p-1.5 border border-slate-700 text-xs">
               <span className="text-slate-400 px-2 font-medium">Decision:</span>
               <input
                 type="date"
-                min="2026-01-01"
-                max="2026-01-31"
+                aria-label="Decision date"
+                min={DECISION_MIN}
+                max={DECISION_MAX}
                 value={decisionDate}
-                onChange={(e) => setDecisionDate(e.target.value)}
+                onChange={(e) => {
+                  if (isValidDecisionDate(e.target.value)) onDecisionDateChange(e.target.value);
+                }}
                 className="bg-slate-900 text-white rounded px-2 py-1 border border-slate-700 outline-none focus:border-sky-500"
               />
               <span className="text-slate-500 px-1">→</span>
@@ -108,44 +110,47 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
-          {/* Gate Cutoff Selector */}
           <div className="flex items-center bg-slate-800 rounded-lg p-1.5 border border-slate-700 text-xs">
             <Sliders className="w-3.5 h-3.5 text-slate-400 ml-1.5 mr-1" />
             <span className="text-slate-400 px-1 font-medium">Gate:</span>
             <select
+              aria-label="Gate closure"
+              title={gate.description}
               value={cutoff}
-              onChange={(e) => setCutoff(e.target.value)}
+              onChange={(e) => onCutoffChange(e.target.value)}
               className="bg-slate-900 text-white rounded px-2 py-1 border border-slate-700 outline-none focus:border-sky-500"
             >
-              <option value="09:20">09:20 UK (EPEX Spot • 07:30 run)</option>
-              <option value="09:50">09:50 UK (N2EX • 09:30 run)</option>
-              <option value="11:00">11:00 UK (Historical • 09:30 run)</option>
+              {GATES.map((g) => (
+                <option key={g.value} value={g.value}>
+                  {g.label}
+                </option>
+              ))}
             </select>
           </div>
 
-          {/* 7-day Walk-forward Debias Toggle */}
           <button
-            onClick={() => setShowDebiased(!showDebiased)}
-            className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors ${
-              showDebiased
+            onClick={onToggleDebiased}
+            disabled={!debiasAvailable}
+            aria-pressed={showDebiased}
+            title={debiasHint}
+            className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              showDebiased && debiasAvailable
                 ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
                 : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
             }`}
           >
             <Zap className="w-3.5 h-3.5" />
-            {showDebiased ? 'Bias-Adjusted ON (−20% MAE)' : 'Debias Overlay'}
+            {debiasLabel}
           </button>
 
-          {/* Coverage Badge */}
           <div className="text-xs px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300">
             Coverage:{' '}
-            <span className="text-emerald-400 font-semibold">{coveragePct}%</span>{' '}
+            <span className="text-emerald-400 font-semibold">{metrics ? formatPct(metrics.coverage_pct, 1) : DASH}</span>{' '}
             <span className="text-slate-500">
-              ({pairedCount}/{totalCount})
+              ({metrics ? `${metrics.paired_periods.toLocaleString('en-GB')}/${metrics.total_periods.toLocaleString('en-GB')}` : DASH})
             </span>
           </div>
 
-          {/* CSV Export Button */}
           <a
             href={exportUrl}
             download
